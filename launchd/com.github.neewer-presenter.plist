@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.github.neewer-presenter</string>
+  <key>ProgramArguments</key>
+  <array>
+    <!-- Adjust the paths to where you cloned the repo -->
+    <string>/Users/YOURNAME/neewer-presenter/.venv/bin/python</string>
+    <string>/Users/YOURNAME/neewer-presenter/neewer_presenter.py</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/neewer-presenter.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/neewer-presenter.log</string>
+</dict>
+</plist>

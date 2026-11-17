@@ -1,0 +1,12 @@
+[Unit]
+Description=NEEWER BLE remote to keyboard bridge
+After=graphical-session.target bluetooth.target
+
+[Service]
+# Adjust the path to where you cloned the repo
+ExecStart=%h/neewer-presenter/.venv/bin/python %h/neewer-presenter/neewer_presenter.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

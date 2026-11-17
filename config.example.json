@@ -1,0 +1,9 @@
+{
+  "buttons": {
+    "shutter": "Right",
+    "a_minus": "l",
+    "a_plus": "b",
+    "up": "Left",
+    "down": "Right"
+  }
+}
