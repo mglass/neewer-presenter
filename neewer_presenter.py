@@ -25,8 +25,6 @@ import subprocess
 import sys
 import time
 
-from bleak import BleakClient, BleakScanner
-
 print = functools.partial(print, flush=True)  # survive piped/logged stdout
 
 NOTIFY_UUID = "69400003-b5a3-f393-e0a9-e50e24dcca99"
@@ -94,22 +92,10 @@ def make_key_presser():
     sys.exit(f"Unsupported platform: {system}")
 
 
-async def find_device(address):
-    if address:
-        dev = await BleakScanner.find_device_by_address(address, timeout=15)
-    else:
-        dev = await BleakScanner.find_device_by_filter(
-            lambda d, ad: (d.name or "").upper().startswith(NAME_PREFIX), timeout=15)
-    return dev
-
-
-async def run():
-    cfg = load_config()
-    buttons = cfg["buttons"]
-    press = make_key_presser()
+def make_notify_handler(buttons, press):
     last = {}
 
-    def on_notify(_char, data: bytearray):
+    def on_notify(data):
         if len(data) >= 4 and data[0] == 0x78:
             name = BUTTON_CODES.get(data[3])
             key = buttons.get(name)
@@ -119,22 +105,155 @@ async def run():
                 print(f"{name} -> {key}")
                 press(key)
 
+    return on_notify
+
+
+async def run_mac(cfg, on_notify):
+    """macOS: find the remote by scanning (or address) and hold the connection."""
+    from bleak import BleakClient, BleakScanner
+
     while True:
-        dev = await find_device(cfg.get("address"))
+        address = cfg.get("address")
+        if address:
+            dev = await BleakScanner.find_device_by_address(address, timeout=15)
+        else:
+            dev = await BleakScanner.find_device_by_filter(
+                lambda d, ad: (d.name or "").upper().startswith(NAME_PREFIX),
+                timeout=15)
         if dev is None:
             print("remote not found (is it on and paired?), retrying in 10s...")
             await asyncio.sleep(10)
             continue
         try:
             disconnected = asyncio.Event()
-            async with BleakClient(dev, disconnected_callback=lambda c: disconnected.set()) as client:
-                await client.start_notify(NOTIFY_UUID, on_notify)
+            async with BleakClient(
+                    dev, disconnected_callback=lambda c: disconnected.set()) as client:
+                await client.start_notify(NOTIFY_UUID,
+                                          lambda _c, data: on_notify(data))
                 print(f"connected to {dev.name} ({dev.address}); listening for buttons")
                 await disconnected.wait()
             print("remote disconnected, reconnecting...")
         except Exception as e:
             print(f"connection error: {e}; retrying in 5s...")
             await asyncio.sleep(5)
+
+
+async def run_bluez(cfg, on_notify):
+    """Linux: talk to BlueZ over D-Bus directly.
+
+    A bonded remote auto-reconnects to BlueZ and stops advertising, so a BLE
+    scan can never find it — instead we watch BlueZ's object tree for the
+    device and subscribe whenever its services are resolved.
+    """
+    from dbus_fast import BusType
+    from dbus_fast.aio import MessageBus
+
+    address = cfg.get("address")
+    bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+    intro = await bus.introspect("org.bluez", "/")
+    obj = bus.get_proxy_object("org.bluez", "/", intro)
+    objmgr = obj.get_interface("org.freedesktop.DBus.ObjectManager")
+
+    async def get_iface(path, iface):
+        node = await bus.introspect("org.bluez", path)
+        return bus.get_proxy_object("org.bluez", path, node).get_interface(iface)
+
+    def find_remote(objects):
+        for path, ifaces in objects.items():
+            dev = ifaces.get("org.bluez.Device1")
+            if not dev:
+                continue
+            addr = dev["Address"].value
+            name = (dev.get("Name") or dev.get("Alias"))
+            name = name.value if name else ""
+            if (address and addr.upper() == address.upper()) or \
+               (not address and name.upper().startswith(NAME_PREFIX)):
+                return path
+        return None
+
+    def find_notify_char(objects, dev_path):
+        for path, ifaces in objects.items():
+            ch = ifaces.get("org.bluez.GattCharacteristic1")
+            if ch and path.startswith(dev_path) and \
+               ch["UUID"].value.lower() == NOTIFY_UUID:
+                return path
+        return None
+
+    subscribed_path = None
+
+    async def try_subscribe():
+        nonlocal subscribed_path
+        objects = await objmgr.call_get_managed_objects()
+        dev_path = find_remote(objects)
+        if not dev_path:
+            print("remote not found in BlueZ (is it paired?)")
+            return
+        dev = await get_iface(dev_path, "org.bluez.Device1")
+        if not await dev.get_connected():
+            try:
+                await dev.call_connect()  # bonded remotes accept direct connects
+            except Exception as e:
+                print(f"connect failed (remote asleep?): {e}")
+                return
+        if not await dev.get_services_resolved():
+            return  # wait for the ServicesResolved property change
+        char_path = find_notify_char(objects, dev_path)
+        if not char_path:
+            return
+        char = await get_iface(char_path, "org.bluez.GattCharacteristic1")
+
+        def on_props(iface_name, changed, _invalidated):
+            if "Value" in changed:
+                on_notify(bytes(changed["Value"].value))
+
+        props = await get_iface(char_path, "org.freedesktop.DBus.Properties")
+        props.on_properties_changed(on_props)
+        await char.call_start_notify()
+        subscribed_path = char_path
+        print(f"connected via BlueZ ({dev_path.rsplit('/', 1)[-1]}); listening for buttons")
+
+    def on_dev_props(iface_name, changed, _invalidated):
+        nonlocal subscribed_path
+        if iface_name != "org.bluez.Device1":
+            return
+        if "ServicesResolved" in changed:
+            if changed["ServicesResolved"].value:
+                asyncio.get_event_loop().create_task(try_subscribe())
+            else:
+                subscribed_path = None
+                print("remote disconnected, waiting for it to return...")
+
+    # watch every present and future NEEWER device for (re)connection
+    async def watch_device(dev_path):
+        props = await get_iface(dev_path, "org.freedesktop.DBus.Properties")
+        props.on_properties_changed(on_dev_props)
+
+    objects = await objmgr.call_get_managed_objects()
+    dev_path = find_remote(objects)
+    if dev_path:
+        await watch_device(dev_path)
+
+    def on_added(path, ifaces):
+        if "org.bluez.Device1" in ifaces and find_remote({path: ifaces}):
+            asyncio.get_event_loop().create_task(watch_device(path))
+
+    objmgr.on_interfaces_added(on_added)
+
+    while True:
+        if subscribed_path is None:
+            await try_subscribe()
+            await asyncio.sleep(10)
+        else:
+            await asyncio.sleep(30)
+
+
+async def run():
+    cfg = load_config()
+    on_notify = make_notify_handler(cfg["buttons"], make_key_presser())
+    if platform.system() == "Linux":
+        await run_bluez(cfg, on_notify)
+    else:
+        await run_mac(cfg, on_notify)
 
 
 if __name__ == "__main__":
