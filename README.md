@@ -34,7 +34,7 @@ may use the same protocol — reports welcome.
 Requires Python 3.9+ and [bleak](https://github.com/hbldh/bleak).
 
 ```sh
-git clone https://github.com/YOURNAME/neewer-presenter
+git clone https://github.com/mglass/neewer-presenter
 cd neewer-presenter
 python3 -m venv .venv && .venv/bin/pip install bleak
 ```
