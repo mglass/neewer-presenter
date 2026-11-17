@@ -17,6 +17,7 @@ Usage:  python3 neewer_presenter.py [path/to/config.json]
 """
 
 import asyncio
+import functools
 import json
 import os
 import platform
@@ -25,6 +26,8 @@ import sys
 import time
 
 from bleak import BleakClient, BleakScanner
+
+print = functools.partial(print, flush=True)  # survive piped/logged stdout
 
 NOTIFY_UUID = "69400003-b5a3-f393-e0a9-e50e24dcca99"
 NAME_PREFIX = "NEEWER"
